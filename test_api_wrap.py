@@ -47,6 +47,15 @@ class RagasJudgeLLM(LLM):
         except Exception as e:
             raise ValueError(f"调用 LLM API 异步出错: {e}")
 
+
+    async def agenerate_prompt(self, prompts: List) -> dict:
+        # 👇 手动把 PromptValue 转换成 str
+        clean_prompts = [
+            p.to_string() if hasattr(p, "to_string") else str(p)
+            for p in prompts
+        ]
+        return await super().agenerate_prompt(clean_prompts)
+
     @property
     def _llm_type(self) -> str:
         return "ragas_judge_llm"
