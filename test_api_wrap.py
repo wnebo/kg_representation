@@ -1,0 +1,36 @@
+# my_llm_wrapper.py
+
+from typing import Optional, List
+from langchain_core.language_models.llms import LLM
+import requests
+
+
+class RagasJudgeLLM(LLM):
+    """
+    封装一个带 header 的简单 LLM API，兼容 LangChain 和 RAGAS。
+    """
+    url: str  # 你的 API 地址，比如 http://localhost:8000/generate
+
+    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+        """
+        向 API 发送请求，提取 content 字段作为模型输出。
+        """
+        try:
+            payload = {"prompt": prompt}
+            headers = {
+                "Content-Type": "application/json"  # 明确告诉服务器我们发送的是 JSON
+            }
+
+            response = requests.post(self.url, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            content = data.get("content", "").strip()
+            return content
+
+        except Exception as e:
+            raise ValueError(f"调用 LLM API 出错: {e}")
+
+    @property
+    def _llm_type(self) -> str:
+        return "ragas_judge_llm"
