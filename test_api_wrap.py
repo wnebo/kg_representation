@@ -30,6 +30,22 @@ class RagasJudgeLLM(LLM):
 
         except Exception as e:
             raise ValueError(f"调用 LLM API 出错: {e}")
+    async def _acall(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+        """
+        异步调用：用于 RAGAS 或 LangChain 中的 async 流程。
+        """
+        try:
+            payload = {"prompt": prompt}
+            headers = {"Content-Type": "application/json"}
+            async with aiohttp.ClientSession() as session:
+                async with session.post(self.url, json=payload, headers=headers, timeout=30) as response:
+                    if response.status != 200:
+                        raise ValueError(f"HTTP错误: {response.status}")
+                    data = await response.json()
+                    content = data.get("content", "").strip()
+                    return content
+        except Exception as e:
+            raise ValueError(f"调用 LLM API 异步出错: {e}")
 
     @property
     def _llm_type(self) -> str:
