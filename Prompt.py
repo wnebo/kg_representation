@@ -14,3 +14,96 @@ Please follow these instructions:
   "relation_types": ["..."]
 }
 '''
+
+financial_entity_types = [
+    # 企业与组织
+    "company",
+    "subsidiary",
+    "parent_company",
+    "startup",
+    "financial_institution",
+    "investment_bank",
+    "commercial_bank",
+    "central_bank",
+    "hedge_fund",
+    "private_equity_firm",
+    "venture_capital_firm",
+    "insurance_company",
+    "rating_agency",
+    "regulatory_agency",
+    "exchange",
+    "government_agency",
+    "organization",
+    "legal_entity",
+
+    # 人与角色
+    "person",
+    "founder",
+    "investor",
+    "executive",
+    "ceo",
+    "cfo",
+    "analyst",
+    "trader",
+    "board_member",
+    "regulator",
+
+    # 金融工具与产品
+    "financial_product",
+    "stock",
+    "share",
+    "bond",
+    "corporate_bond",
+    "sovereign_bond",
+    "municipal_bond",
+    "derivative",
+    "option",
+    "future",
+    "etf",
+    "mutual_fund",
+    "index",
+    "loan",
+    "mortgage",
+    "structured_product",
+    "cds",  # credit default swap
+    "currency",
+    "commodity",
+    "digital_asset",
+    "crypto_token",
+
+    # 市场与经济指标
+    "market",
+    "sector",
+    "industry",
+    "exchange_rate",
+    "interest_rate",
+    "inflation_rate",
+    "economic_indicator",
+    "gdp",
+    "cpi",
+    "ppi",
+    "unemployment_rate",
+    "credit_rating",
+    "risk_factor",
+
+    # 行为与事件
+    "merger_acquisition",
+    "investment",
+    "ipo",
+    "bankruptcy",
+    "scandal",
+    "policy_decision",
+    "lawsuit",
+    "financial_crisis",
+    "regulatory_action",
+    "audit",
+
+    # 时间与数值类
+    "date",
+    "amount",
+    "percentage",
+    "duration",
+    "valuation",
+    "stock_price",
+    "market_cap"
+]
