@@ -107,3 +107,42 @@ financial_entity_types = [
     "stock_price",
     "market_cap"
 ]
+
+async def _process_document(
+    self, text: str, prompt_variables: dict[str, str]
+) -> str:
+    history_messages = []
+    results = ""
+
+    # 初始提问
+    user_prompt = self._extraction_prompt.format(**{
+        **prompt_variables,
+        self._input_text_key: text,
+    })
+    history_messages.append(f"User: {user_prompt}")
+    response = await self._model.achat("\n".join(history_messages))
+    content = response.output.content or ""
+    results += content
+    history_messages.append(f"Assistant: {content}")
+
+    # 多轮抽取
+    if self._max_gleanings > 0:
+        for i in range(self._max_gleanings):
+            history_messages.append(f"User: {CONTINUE_PROMPT}")
+            response = await self._model.achat("\n".join(history_messages))
+            content = response.output.content or ""
+            results += content
+            history_messages.append(f"Assistant: {content}")
+
+            if i >= self._max_gleanings - 1:
+                break
+
+            history_messages.append(f"User: {LOOP_PROMPT}")
+            response = await self._model.achat("\n".join(history_messages))
+            loop_check = (response.output.content or "").strip()
+            history_messages.append(f"Assistant: {loop_check}")
+
+            if loop_check != "Y":
+                break
+
+    return results
