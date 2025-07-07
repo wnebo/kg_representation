@@ -81,3 +81,52 @@ reply = await chat_service.complete_chat_async(
 )
 
 print("🤖 LLM 回复：", reply.content)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import requests, json
+from semantic_kernel.connectors.ai.open_ai.services.open_ai_chat_completion import OpenAIChatCompletion  # 参考现有实现
+from semantic_kernel.agents import ChatCompletionAgent
+from semantic_kernel.connectors.ai.open_ai.services.open_ai_chat_prompt import OpenAIChatPromptSettings
+from semantic_kernel.connectors.ai.base import ChatCompletionClient  # 基类路径
+
+class MyCompanyChatCompletion(ChatCompletionClient):
+    def __init__(self, endpoint: str, model: str):
+        self.endpoint = endpoint
+        self.model = model
+
+    def create_chat_completion(self, prompt_messages: list, **kwargs):
+        # prompt_messages: list of dicts {"role":"user"/"assistant", "content": "..."}
+        data = {"model": self.model, "messages": prompt_messages}
+        headers = {"Content-Type": "application/json"}
+        resp = requests.post(self.endpoint, headers=headers, data=json.dumps(data), proxies={'http':None,'https':None})
+        resp.raise_for_status()
+        j = resp.json()
+        return j["choices"][0]["message"]
+
+from semantic_kernel import Kernel
+
+kernel = Kernel()
+svc = MyCompanyChatCompletion(endpoint="http://your-endpoint", model="model_name")
+kernel.register_chat_completion_service("company-llm", svc)
+
+agent = ChatCompletionAgent(
+    service=svc,
+    name="MyCompanyAgent",
+    instructions="你是一个智能中文助手。"
+)
+
+response = agent.get_response(messages=[{"role": "user", "content": "你好"}])
+print(response.content)
