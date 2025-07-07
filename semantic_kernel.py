@@ -184,3 +184,97 @@ client = MySimpleLLMClient(
     service_id="my-company-llm"  # 可以自定义，只要唯一即可
 )
 kernel.add_service(client)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# my_sk_llm_wrapper.py
+
+from semantic_kernel.connectors.ai.chat_completion_client_base import ChatCompletionClientBase
+from semantic_kernel.connectors.ai.chat_message import ChatMessage
+from semantic_kernel.connectors.ai.prompt_execution_settings import PromptExecutionSettings
+from semantic_kernel.connectors.ai.chat_completion_result import ChatCompletionResult
+from semantic_kernel.connectors.ai.chat_message_content import ChatMessageContent
+from semantic_kernel.connectors.ai.chat_role import ChatRole
+from typing import List, Optional, Union
+import aiohttp
+
+
+class MySKCompatibleLLM(ChatCompletionClientBase):
+    """
+    用于 Semantic Kernel 的自定义 LLM 客户端，兼容 ChatCompletionAgent。
+    """
+
+    def __init__(self, url: str, service_id: Optional[str] = None):
+        self.url = url
+        self._service_id = service_id or "custom_llm"
+
+    @property
+    def service_id(self) -> str:
+        return self._service_id
+
+    async def get_chat_message_contents_async(
+        self,
+        messages: List[ChatMessage],
+        settings: Optional[PromptExecutionSettings] = None,
+        *,
+        metadata: Optional[dict] = None,
+    ) -> List[ChatMessageContent]:
+        """
+        这是 ChatCompletionAgent 所依赖的核心方法。
+        """
+
+        # 将 ChatMessage 列表转换为单一 prompt（你也可以更智能地组织）
+        prompt = "\n".join(
+            f"{m.role.value}: {m.content}" for m in messages if m.content is not None
+        )
+
+        payload = {"prompt": prompt}
+        headers = {"Content-Type": "application/json"}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.url, json=payload, headers=headers, timeout=30) as response:
+                if response.status != 200:
+                    raise ValueError(f"HTTP错误: {response.status}")
+                data = await response.json()
+                content = data.get("content", "").strip()
+
+        return [
+            ChatMessageContent(
+                role=ChatRole.ASSISTANT,
+                content=content,
+                inner_content=content,
+                encoding="utf-8",
+                metadata=metadata or {},
+                model_id="my-custom-model"
+            )
+        ]
+from my_sk_llm_wrapper import MySKCompatibleLLM
+
+...
+
+agent = ChatCompletionAgent(
+    service=MySKCompatibleLLM(url="http://localhost:8000/generate"),
+    name="SK-Assistant",
+    instructions="You are a helpful assistant.",
+    plugins=[MenuPlugin()],
+    arguments=KernelArguments(settings)
+)
