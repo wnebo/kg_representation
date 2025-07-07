@@ -138,23 +138,19 @@ print(response.content)
 
 
 
-
-import json
-import requests
-from typing import Any, Optional, List
-from semantic_kernel.connectors.ai.chat_completion_client_base import ChatCompletionClientBase
-from semantic_kernel.connectors.ai.prompt_execution_settings import PromptExecutionSettings
-from semantic_kernel.contents.chat_history import ChatHistory
-from semantic_kernel.contents.chat_message_content import ChatMessageContent
-
 class MySimpleLLMClient(ChatCompletionClientBase):
-    def __init__(self, model_id: str, endpoint: str):
+    def __init__(self, model_id: str, endpoint: str, service_id: str = "custom-llm"):
         self._model_id = model_id
         self._endpoint = endpoint
+        self._service_id = service_id
 
     @property
     def ai_model_id(self) -> str:
         return self._model_id
+
+    @property
+    def service_id(self) -> str:
+        return self._service_id
 
     async def get_chat_message_content(
         self,
@@ -181,21 +177,10 @@ class MySimpleLLMClient(ChatCompletionClientBase):
         response_data = response.json()
         content = response_data["choices"][0]["message"]["content"]
         return ChatMessageContent(role="assistant", content=content)
-import asyncio
-from semantic_kernel.kernel import Kernel
-from semantic_kernel.contents.chat_history import ChatHistory
 
-async def main():
-    kernel = Kernel()
-    client = MySimpleLLMClient(
-        model_id="your-model-name",
-        endpoint="http://your-company-endpoint"
-    )
-    kernel.add_service(client)
-
-    chat = ChatHistory()
-    chat.add_user_message("你好，可以帮我写一个寒假学习计划吗？")
-    result = await client.get_chat_message_content(chat)
-    print("LLM 回复：", result.content)
-
-asyncio.run(main())
+client = MySimpleLLMClient(
+    model_id="your-model-name",
+    endpoint="http://your-company-endpoint",
+    service_id="my-company-llm"  # 可以自定义，只要唯一即可
+)
+kernel.add_service(client)
