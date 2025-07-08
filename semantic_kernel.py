@@ -278,3 +278,60 @@ agent = ChatCompletionAgent(
     plugins=[MenuPlugin()],
     arguments=KernelArguments(settings)
 )
+
+
+
+
+
+
+
+
+import httpx
+import asyncio
+import json
+from typing import AsyncGenerator
+
+async def _inner_get_chat_message_contents(user_input: str, model_name: str, url: str) -> str:
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": user_input}]
+    }
+    async with httpx.AsyncClient(proxies=None) as client:
+        response = await client.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        response_data = response.json()
+        return response_data['choices'][0]['message']['content']
+
+async def _inner_get_streaming_chat_message_contents(user_input: str, model_name: str, url: str) -> AsyncGenerator[str, None]:
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": user_input}],
+        "stream": True
+    }
+    async with httpx.AsyncClient(proxies=None) as client:
+        async with client.stream("POST", url, headers=headers, json=data) as response:
+            response.raise_for_status()
+            async for line_bytes in response.aiter_lines():
+                if line_bytes:
+                    line = line_bytes.strip()
+                    if line.startswith("data:"):
+                        line = line[len("data:"):].strip()
+                    if line == "[DONE]":
+                        break
+                    try:
+                        data_json = json.loads(line)
+                        chunk = data_json['choices'][0]['delta'].get('content')
+                        if chunk:
+                            yield chunk
+                    except json.JSONDecodeError:
+                        continue
+
+
+# 获取完整回复
+answer = await _inner_get_chat_message_contents("你好", "gpt-4", "http://api.example.com/chat")
+
+# 逐步获取流式回复
+async for chunk in _inner_get_streaming_chat_message_contents("你好", "gpt-4", "http://api.example.com/chat"):
+    print(chunk, end="", flush=True)
