@@ -31,3 +31,43 @@ async def main():
     print(rsp.content)
 
 asyncio.run(main())
+
+
+
+
+
+
+
+
+
+
+from semantic_kernel.connectors.ai.open_ai import OpenAIChatPromptExecutionSettings
+from semantic_kernel.functions import KernelArguments
+from semantic_kernel.agents import ChatCompletionAgent
+
+# 1) 构造 PromptExecutionSettings
+settings = OpenAIChatPromptExecutionSettings(
+    service_id="your-service-id",   # 和你注册的 service_id 保持一致
+    ai_model_id="model_name",       # 你要用的模型
+    temperature=0.7,                # 调整温度
+    max_tokens=800,                 # 最大 token 数
+    top_p=0.9,                      # nucleus 采样
+    stream=False                    # 是否开启流式
+)
+
+# （可选）如果你有插件要自动调用，也可以在这里打开它：
+# from semantic_kernel.connectors.ai.prompt_execution_settings import ToolCallBehavior
+# settings.tool_call_behavior = ToolCallBehavior.AutoInvokeKernelFunctions()
+
+# 2) 包装成 KernelArguments
+args = KernelArguments(settings)
+
+# 3) 把 arguments 传给你的 Agent
+agent = ChatCompletionAgent(
+    service=service,
+    name="SK-Assistant",
+    instructions="You are a helpful waiter.",
+    plugins=[MenuPlugin()],
+    arguments=args            # ← 这里传入的 settings 将作用于所有 get_response 调用
+)
+
