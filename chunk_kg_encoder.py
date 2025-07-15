@@ -114,28 +114,37 @@ faiss.write_index(index, "kg_faiss.index")
 # loaded = faiss.read_index("kg_faiss.index")
 
 
-
-
 import os
+import pickle
 from PyPDF2 import PdfReader
 
-# 1. 指定你的 PDF 文件名
-pdf_path = "your_document.pdf"
+def pdf_to_page_dict(pdf_path: str) -> dict[int, str]:
+    """
+    读取 pdf_path 指定的 PDF 文件，
+    返回一个 dict：{页码（从 1 开始）: 文本内容}
+    """
+    reader = PdfReader(pdf_path)
+    num_pages = len(reader.pages)
 
-# 2. 创建输出目录
-output_dir = "pages"
-os.makedirs(output_dir, exist_ok=True)
+    page_dict: dict[int, str] = {}
+    for i in range(num_pages):
+        text = reader.pages[i].extract_text() or ""
+        page_dict[i + 1] = text
 
-# 3. 读取 PDF
-reader = PdfReader(pdf_path)
-num_pages = len(reader.pages)
+    return page_dict
 
-# 4. 按页提取并保存
-for i in range(num_pages):
-    page = reader.pages[i]
-    text = page.extract_text()
-    with open(os.path.join(output_dir, f"page_{i+1}.txt"), "w", encoding="utf-8") as f:
-        f.write(text or "")
-    print(f"Saved page {i+1}/{num_pages}")
+if __name__ == "__main__":
+    pdf_path = "your_document.pdf"
+    output_pkl = "page_dict.pkl"
 
-print("所有页面已保存至 'pages' 文件夹。")
+    # 1. 把 PDF 按页读成 dict
+    pages = pdf_to_page_dict(pdf_path)
+
+    # 2. 确保输出目录存在（可选）
+    os.makedirs(os.path.dirname(output_pkl) or ".", exist_ok=True)
+
+    # 3. 存成 pickle
+    with open(output_pkl, "wb") as f:
+        pickle.dump(pages, f)
+
+    print(f"已生成 {len(pages)} 页的字典，并保存为 {output_pkl}")
