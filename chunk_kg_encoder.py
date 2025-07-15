@@ -112,3 +112,30 @@ print("Returned chunk_ids:", I)
 faiss.write_index(index, "kg_faiss.index")
 # 下次可以直接读回、继续增删或搜索
 # loaded = faiss.read_index("kg_faiss.index")
+
+
+
+
+import os
+from PyPDF2 import PdfReader
+
+# 1. 指定你的 PDF 文件名
+pdf_path = "your_document.pdf"
+
+# 2. 创建输出目录
+output_dir = "pages"
+os.makedirs(output_dir, exist_ok=True)
+
+# 3. 读取 PDF
+reader = PdfReader(pdf_path)
+num_pages = len(reader.pages)
+
+# 4. 按页提取并保存
+for i in range(num_pages):
+    page = reader.pages[i]
+    text = page.extract_text()
+    with open(os.path.join(output_dir, f"page_{i+1}.txt"), "w", encoding="utf-8") as f:
+        f.write(text or "")
+    print(f"Saved page {i+1}/{num_pages}")
+
+print("所有页面已保存至 'pages' 文件夹。")
