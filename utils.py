@@ -30,6 +30,17 @@ def move_pdfs(src_dir: str, dst_dir: str) -> None:
         except Exception as e:
             print(f"移动失败 {filename}: {e}")
 
+
+import re
+
+def sanitize(text: str) -> str:
+    # 保留 \n \r \t，其他 0x00–0x1F 全部替换成空格
+    return re.sub(r'[\x00-\x08\x0b-\x0c\x0e-\x1f]', ' ', text)
+
+clean_pages = [sanitize(p) for p in pages]      # pages 是你分好的每页文本列表
+# 然后再送给 LLM
+
+
 if __name__ == "__main__":
     source_directory = "/path/to/source_folder"
     destination_directory = "/path/to/destination_folder"
