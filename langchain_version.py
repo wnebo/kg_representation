@@ -25,7 +25,45 @@ chain = prompt | llm            # Runnable 拼接
 print(chain.invoke({"question": "用三句话介绍机器学习"}).content)
 
 
+# 带历史的llm
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import (
+    ChatPromptTemplate, MessagesPlaceholder
+)
+from langchain.memory import ConversationBufferMemory
+from langchain.schema import HumanMessage
+from langchain.chains import RunnableWithMemory
 
+# 1️⃣ 你的 LLM（指向公司 /v2/chat/completions）
+llm = ChatOpenAI(
+    model="model_name",
+    base_url="http://your-company-llm-endpoint/v2",
+    api_key="",
+    temperature=0.7,
+)
+
+# 2️⃣ 带 history 占位符的 Prompt
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are a helpful assistant."),
+    MessagesPlaceholder(variable_name="history"),   # ← 历史会注入这里
+    ("human", "{question}")                         # 新问题
+])
+
+# 3️⃣ Memory：把每轮对话都存下来
+memory = ConversationBufferMemory(
+    return_messages=True,  # 让 Memory 输出符合 ChatPrompt 的 Message 对象
+)
+
+# 4️⃣ Runnable 组装
+chain_core = prompt | llm                 # 先得到“无记忆”的链
+chat_chain  = RunnableWithMemory(
+    runnable=chain_core,
+    memory=memory
+)
+
+# 5️⃣ 连续调用，history 会自动生效
+print(chat_chain.invoke({"question": "你好，可以做自我介绍吗？"}))
+print(chat_chain.invoke({"question": "请用一句话总结我们刚才的聊天内容。"}))
 
 
 # agent
