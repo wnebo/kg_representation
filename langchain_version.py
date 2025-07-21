@@ -120,3 +120,72 @@ agent = create_openai_functions_agent(
 agent_executor = AgentExecutor(agent=agent, tools=[fetch_weather], verbose=True)
 resp = agent_executor.invoke({"input": "帮我查一下上海今天的天气，然后用一句诗来形容"})
 print(resp["output"])
+
+
+
+from langchain_openai import ChatOpenAI
+from langchain import PromptTemplate, LLMChain
+from langchain.tools import Tool
+from langchain.agents import initialize_agent, AgentType
+
+# 1. 你的 LLM（ReAct Agent 依旧用 ChatOpenAI）
+llm = ChatOpenAI(
+    model="model_name",
+    base_url="http://your-company-llm-endpoint/v2",
+    api_key="",
+    temperature=0,
+)
+
+# 2. 准备类别列表（格式化成字符串）
+category_list = "\n".join(f"{i+1}. {name}: {desc}" 
+    for i,(name,desc) in enumerate([
+        ("订单查询", "查询订单状态、物流信息…"),
+        ("售后退款", "退货、退款、售后流程…"),
+        # … 你剩下的 28 条 …
+    ])
+)
+
+# 3. 用一个 LLMChain 做分类
+template = """  
+下面有 30 个类别，每行是“编号. 类别名: 描述”：
+{category_list}
+
+请把用户的问题严格地分类到上面之一，只返回“编号 + 类别名”，不要其他多余内容。
+
+问题: {question}
+"""
+prompt = PromptTemplate.from_template(template)
+classification_chain = LLMChain(llm=llm, prompt=prompt)
+
+# 4. 包装成一个 Tool
+def classify_question_tool(question: str) -> str:
+    return classification_chain.run({
+        "category_list": category_list,
+        "question": question
+    })
+
+tools = [
+    Tool(
+        name="ClassifyQuestion",
+        func=classify_question_tool,
+        description="将用户的问题分类到预定义的 30 个类别之一，返回“编号. 类别名”"
+    )
+]
+
+# 5. 用 ReAct Agent 把分类工具挂进去
+agent = initialize_agent(
+    tools=tools,
+    llm=llm,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True,
+)
+
+# 6. 测试
+print(agent.run("我想知道我的退款怎么申请？"))
+# 可能输出： “2. 售后退款”
+
+
+Thought: 我需要调用 ClassifyQuestion 工具来判断类别
+Action: ClassifyQuestion
+Action Input: 我想知道我的退款怎么申请？
+Tool Response: 2. 售后退款
