@@ -1,0 +1,473 @@
+import os
+import pickle
+import random
+from pathlib import Path
+from typing import List, Dict, Tuple, Optional
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sentence_transformers import SentenceTransformer, InputExample, losses
+from sentence_transformers.evaluation import EmbeddingSimilarityEvaluator, InformationRetrievalEvaluator
+from torch.utils.data import DataLoader
+import torch
+import json
+from datetime import datetime
+import logging
+
+# 设置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class RAGDatasetLoader:
+    """RAG数据集加载器"""
+    
+    def __init__(self, base_dir: str):
+        """
+        初始化数据加载器
+        
+        Args:
+            base_dir: 包含所有文件文件夹的基础目录
+        """
+        self.base_dir = Path(base_dir)
+        self.files_info = []
+        self._scan_files()
+    
+    def _scan_files(self):
+        """扫描所有可用的文件"""
+        logger.info(f"扫描目录: {self.base_dir}")
+        
+        for file_folder in self.base_dir.iterdir():
+            if file_folder.is_dir():
+                # 检查必要文件是否存在
+                pagenum2context_path = file_folder / "pagenum2context.pkl"
+                page_question_dir = file_folder / "page_question"
+                
+                if pagenum2context_path.exists() and page_question_dir.exists():
+                    # 检查page_question子文件夹内的文件
+                    required_files = [
+                        "page2question.pkl",
+                        "question_list.pkl", 
+                        "questions2page.pkl",
+                        "question2vec_faiss.index"
+                    ]
+                    
+                    all_exist = all(
+                        (page_question_dir / file).exists() 
+                        for file in required_files
+                    )
+                    
+                    if all_exist:
+                        self.files_info.append({
+                            'name': file_folder.name,
+                            'path': file_folder,
+                            'pagenum2context': pagenum2context_path,
+                            'page_question_dir': page_question_dir
+                        })
+                        logger.info(f"找到有效文件: {file_folder.name}")
+                    else:
+                        logger.warning(f"文件 {file_folder.name} 缺少必要文件")
+                else:
+                    logger.warning(f"文件 {file_folder.name} 缺少基本结构")
+        
+        logger.info(f"总共找到 {len(self.files_info)} 个有效文件")
+    
+    def load_file_data(self, file_info: Dict) -> Tuple[Dict, Dict, List, Dict]:
+        """
+        加载单个文件的数据
+        
+        Returns:
+            Tuple[pagenum2context, page2question, question_list, questions2page]
+        """
+        try:
+            # 加载页面内容
+            with open(file_info['pagenum2context'], 'rb') as f:
+                pagenum2context = pickle.load(f)
+            
+            # 加载问题相关数据
+            page_question_dir = file_info['page_question_dir']
+            
+            with open(page_question_dir / "page2question.pkl", 'rb') as f:
+                page2question = pickle.load(f)
+            
+            with open(page_question_dir / "question_list.pkl", 'rb') as f:
+                question_list = pickle.load(f)
+                
+            with open(page_question_dir / "questions2page.pkl", 'rb') as f:
+                questions2page = pickle.load(f)
+            
+            logger.info(f"加载文件 {file_info['name']}: "
+                       f"{len(pagenum2context)} 页, {len(question_list)} 问题")
+            
+            return pagenum2context, page2question, question_list, questions2page
+            
+        except Exception as e:
+            logger.error(f"加载文件 {file_info['name']} 失败: {e}")
+            return {}, {}, [], {}
+    
+    def get_files_list(self) -> List[Dict]:
+        """获取所有文件信息列表"""
+        return self.files_info.copy()
+
+class FineTuneDataPreprocessor:
+    """微调数据预处理器"""
+    
+    def __init__(self):
+        self.positive_samples = []  # 正样本 (question, relevant_context)
+        self.negative_samples = []  # 负样本 (question, irrelevant_context)
+        self.triplets = []         # 三元组 (anchor, positive, negative)
+    
+    def create_training_samples(self, file_data_list: List[Tuple]):
+        """
+        从多个文件创建训练样本
+        
+        Args:
+            file_data_list: [(pagenum2context, page2question, question_list, questions2page), ...]
+        """
+        logger.info("开始创建训练样本...")
+        
+        all_contexts = {}  # page_id -> context (跨文件的全局页面ID)
+        question_to_context = {}  # question -> context
+        
+        # 收集所有数据
+        for file_idx, (pagenum2context, page2question, question_list, questions2page) in enumerate(file_data_list):
+            # 创建全局页面ID
+            for page_num, context in pagenum2context.items():
+                global_page_id = f"file_{file_idx}_page_{page_num}"
+                all_contexts[global_page_id] = context
+            
+            # 建立问题到上下文的映射
+            for question in question_list:
+                if question in questions2page:
+                    page_num = questions2page[question]
+                    if page_num in pagenum2context:
+                        global_page_id = f"file_{file_idx}_page_{page_num}"
+                        question_to_context[question] = {
+                            'page_id': global_page_id,
+                            'context': pagenum2context[page_num]
+                        }
+        
+        logger.info(f"收集到 {len(all_contexts)} 个页面上下文")
+        logger.info(f"收集到 {len(question_to_context)} 个问题-上下文对")
+        
+        # 创建正样本
+        for question, context_info in question_to_context.items():
+            self.positive_samples.append({
+                'question': question,
+                'context': context_info['context'],
+                'label': 1,
+                'page_id': context_info['page_id']
+            })
+        
+        # 创建负样本
+        all_context_items = list(all_contexts.items())
+        
+        for question, context_info in question_to_context.items():
+            # 随机选择不相关的上下文作为负样本
+            negative_contexts = random.sample(all_context_items, min(3, len(all_context_items)))
+            
+            for neg_page_id, neg_context in negative_contexts:
+                if neg_page_id != context_info['page_id']:  # 确保不是同一个页面
+                    self.negative_samples.append({
+                        'question': question,
+                        'context': neg_context,
+                        'label': 0,
+                        'page_id': neg_page_id
+                    })
+        
+        # 创建三元组 (question, positive_context, negative_context)
+        for question, context_info in question_to_context.items():
+            # 随机选择负样本
+            negative_contexts = [
+                ctx for page_id, ctx in all_context_items 
+                if page_id != context_info['page_id']
+            ]
+            
+            if negative_contexts:
+                neg_context = random.choice(negative_contexts)
+                self.triplets.append({
+                    'anchor': question,
+                    'positive': context_info['context'],
+                    'negative': neg_context
+                })
+        
+        logger.info(f"创建了 {len(self.positive_samples)} 个正样本")
+        logger.info(f"创建了 {len(self.negative_samples)} 个负样本") 
+        logger.info(f"创建了 {len(self.triplets)} 个三元组")
+    
+    def get_contrastive_examples(self) -> List[InputExample]:
+        """获取对比学习样本"""
+        examples = []
+        
+        # 正样本
+        for sample in self.positive_samples:
+            examples.append(InputExample(
+                texts=[sample['question'], sample['context']],
+                label=float(sample['label'])
+            ))
+        
+        # 负样本
+        for sample in self.negative_samples:
+            examples.append(InputExample(
+                texts=[sample['question'], sample['context']],
+                label=float(sample['label'])
+            ))
+        
+        return examples
+    
+    def get_triplet_examples(self) -> List[InputExample]:
+        """获取三元组学习样本"""
+        examples = []
+        
+        for triplet in self.triplets:
+            examples.append(InputExample(
+                texts=[triplet['anchor'], triplet['positive'], triplet['negative']]
+            ))
+        
+        return examples
+    
+    def save_samples(self, output_dir: str):
+        """保存预处理的样本"""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True)
+        
+        # 保存各种样本
+        with open(output_dir / "positive_samples.pkl", 'wb') as f:
+            pickle.dump(self.positive_samples, f)
+        
+        with open(output_dir / "negative_samples.pkl", 'wb') as f:
+            pickle.dump(self.negative_samples, f)
+            
+        with open(output_dir / "triplets.pkl", 'wb') as f:
+            pickle.dump(self.triplets, f)
+        
+        logger.info(f"样本已保存到 {output_dir}")
+
+class RAGModelFineTuner:
+    """RAG模型微调器"""
+    
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2", output_dir: str = "finetuned_model"):
+        """
+        初始化微调器
+        
+        Args:
+            model_name: 基础模型名称
+            output_dir: 输出目录
+        """
+        self.model_name = model_name
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True)
+        
+        # 初始化模型
+        self.model = SentenceTransformer(model_name)
+        
+        logger.info(f"初始化模型: {model_name}")
+        logger.info(f"输出目录: {output_dir}")
+    
+    def train_with_contrastive_loss(self, 
+                                   train_examples: List[InputExample],
+                                   eval_examples: Optional[List[InputExample]] = None,
+                                   epochs: int = 1,
+                                   batch_size: int = 16,
+                                   learning_rate: float = 2e-5):
+        """
+        使用对比损失进行训练
+        """
+        logger.info(f"开始对比学习训练，样本数: {len(train_examples)}")
+        
+        # 创建数据加载器
+        train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=batch_size)
+        
+        # 定义损失函数
+        train_loss = losses.CosineSimilarityLoss(self.model)
+        
+        # 设置评估器
+        evaluator = None
+        if eval_examples:
+            evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
+                eval_examples, 
+                name='sts-eval'
+            )
+        
+        # 训练
+        self.model.fit(
+            train_objectives=[(train_dataloader, train_loss)],
+            evaluator=evaluator,
+            epochs=epochs,
+            evaluation_steps=1000,
+            warmup_steps=100,
+            output_path=str(self.output_dir / "contrastive_model"),
+            optimizer_params={'lr': learning_rate}
+        )
+        
+        logger.info("对比学习训练完成")
+    
+    def train_with_triplet_loss(self,
+                               train_examples: List[InputExample],
+                               eval_examples: Optional[List[InputExample]] = None,
+                               epochs: int = 1,
+                               batch_size: int = 16,
+                               learning_rate: float = 2e-5):
+        """
+        使用三元组损失进行训练
+        """
+        logger.info(f"开始三元组学习训练，样本数: {len(train_examples)}")
+        
+        # 创建数据加载器
+        train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=batch_size)
+        
+        # 定义损失函数
+        train_loss = losses.TripletLoss(self.model)
+        
+        # 设置评估器
+        evaluator = None
+        if eval_examples:
+            evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
+                eval_examples,
+                name='triplet-eval'
+            )
+        
+        # 训练
+        self.model.fit(
+            train_objectives=[(train_dataloader, train_loss)],
+            evaluator=evaluator,
+            epochs=epochs,
+            evaluation_steps=1000,
+            warmup_steps=100,
+            output_path=str(self.output_dir / "triplet_model"),
+            optimizer_params={'lr': learning_rate}
+        )
+        
+        logger.info("三元组学习训练完成")
+    
+    def evaluate_retrieval(self, 
+                          eval_questions: List[str],
+                          eval_contexts: List[str], 
+                          eval_relevant_docs: Dict[int, List[int]]) -> Dict:
+        """
+        评估检索性能
+        
+        Args:
+            eval_questions: 评估问题列表
+            eval_contexts: 评估上下文列表  
+            eval_relevant_docs: {query_id: [relevant_doc_ids]}
+        """
+        logger.info("开始检索性能评估...")
+        
+        # 创建评估器
+        evaluator = InformationRetrievalEvaluator(
+            eval_questions,
+            eval_contexts,
+            eval_relevant_docs,
+            name="retrieval_eval"
+        )
+        
+        # 运行评估
+        results = evaluator(self.model)
+        
+        logger.info(f"检索评估完成: {results}")
+        return results
+
+def main_training_pipeline():
+    """主训练流程"""
+    
+    # 配置
+    BASE_DIR = "path/to/your/84_files"  # 替换为你的实际路径
+    TRAIN_RATIO = 0.8  # 80%用于训练，20%用于评估
+    
+    # 1. 加载数据
+    logger.info("=== 步骤1: 加载数据 ===")
+    loader = RAGDatasetLoader(BASE_DIR)
+    all_files = loader.get_files_list()
+    
+    if len(all_files) == 0:
+        logger.error("未找到任何有效文件！")
+        return
+    
+    # 2. 分割训练/评估文件
+    logger.info("=== 步骤2: 分割训练/评估数据 ===")
+    random.shuffle(all_files)
+    split_idx = int(len(all_files) * TRAIN_RATIO)
+    
+    train_files = all_files[:split_idx]
+    eval_files = all_files[split_idx:]
+    
+    logger.info(f"训练文件: {len(train_files)} 个")
+    logger.info(f"评估文件: {len(eval_files)} 个")
+    
+    # 3. 加载训练数据
+    logger.info("=== 步骤3: 加载训练数据 ===")
+    train_data_list = []
+    for file_info in train_files:
+        data = loader.load_file_data(file_info)
+        if data[0]:  # 检查是否成功加载
+            train_data_list.append(data)
+    
+    # 4. 加载评估数据
+    logger.info("=== 步骤4: 加载评估数据 ===")  
+    eval_data_list = []
+    for file_info in eval_files:
+        data = loader.load_file_data(file_info)
+        if data[0]:
+            eval_data_list.append(data)
+    
+    # 5. 预处理训练数据
+    logger.info("=== 步骤5: 预处理数据 ===")
+    preprocessor = FineTuneDataPreprocessor()
+    preprocessor.create_training_samples(train_data_list)
+    
+    # 保存预处理数据
+    preprocessor.save_samples("preprocessed_data")
+    
+    # 6. 准备训练样本
+    logger.info("=== 步骤6: 准备训练样本 ===")
+    
+    # 获取对比学习样本
+    contrastive_examples = preprocessor.get_contrastive_examples()
+    train_examples, val_examples = train_test_split(
+        contrastive_examples, test_size=0.2, random_state=42
+    )
+    
+    # 获取三元组样本
+    triplet_examples = preprocessor.get_triplet_examples()
+    
+    # 7. 开始微调
+    logger.info("=== 步骤7: 开始微调 ===")
+    
+    # 初始化微调器
+    finetuner = RAGModelFineTuner(
+        model_name="all-MiniLM-L6-v2",
+        output_dir="finetuned_rag_model"
+    )
+    
+    # 方法1: 对比学习训练
+    logger.info("开始对比学习训练...")
+    finetuner.train_with_contrastive_loss(
+        train_examples=train_examples,
+        eval_examples=val_examples,
+        epochs=3,
+        batch_size=16,
+        learning_rate=2e-5
+    )
+    
+    # 方法2: 三元组学习训练
+    logger.info("开始三元组学习训练...")
+    finetuner.train_with_triplet_loss(
+        train_examples=triplet_examples[:len(train_examples)],  # 使用相同数量的样本
+        epochs=3,
+        batch_size=16,
+        learning_rate=2e-5
+    )
+    
+    # 8. 评估模型
+    logger.info("=== 步骤8: 评估模型 ===")
+    # TODO: 实现基于eval_data_list的评估逻辑
+    
+    logger.info("训练流程完成！")
+
+if __name__ == "__main__":
+    # 设置随机种子
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
+    
+    # 运行主流程
+    main_training_pipeline()
