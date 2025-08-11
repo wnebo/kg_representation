@@ -1,5 +1,14 @@
-Enhancing Retrieval and Generation in GraphRAG: A Case Study in the Financial Domain
+Practical Optimizations to GraphRAG for Financial Documents: Three Key Improvements
+
 
 Introduction
-During this internship phase, I conducted an in-depth study on GraphRAG (Graph-based Retrieval-Augmented Generation) with the objective of improving information retrieval and question answering performance in large-scale unstructured document collections, particularly within high-specialization domains such as finance. Through systematic experiments and comparative analysis, my work focused on optimizing two key metrics: recall and precision. Leveraging the reasoning and generative capabilities of large language models (LLMs), I proposed and validated several optimization strategies: employing a sliding window mechanism to guide the LLM in “reading with the question,” thereby substantially boosting recall; integrating a generative retriever into the LLM prompt to effectively reduce retrieval noise and outperform conventional reranker models; identifying and introducing the page_index method as a viable alternative to GraphRAG in the financial domain, enabling efficient retrieval without requiring detailed table contents; and reframing user inference-type questions into extraction-type queries during the answer generation phase to improve accuracy. These findings not only provide practical enhancements for GraphRAG in domain-specific settings but also offer methodological insights for broader applications of retrieval-augmented generation across multiple fields.
+This talk focuses on making GraphRAG practical for financial documents—where reports are long and tables are abundant—so we can find the right page, retrieve the right span, and answer accurately. I present three pragmatic improvements  entered on recall and precision:
+
+1. Question-guided sliding windows: the LLM scans the corpus with the user question in mind and returns the most relevant pages, substantially improving recall.
+
+2. Prompt-embedded generative retriever: by embedding a generative retriever directly in the LLM prompt, we suppress retrieval noise and, in my comparisons, outperform a standard reranker.
+
+3. page_question_index as a lightweight alternative: instead of parsing tables upfront, we only locate pages. Concretely, for each page, the LLM generates a small set of “questions this page can answer,” and we build an index from generated question → source span on that page. At query time, we first match the user question in the question space, then jump back to the linked span. This avoids table parsing while remaining efficient and explainable, and it works well because question-to-question similarity is often stronger than question-to-raw-text similarity on table-heavy pages.
+
+Finally, at answer time, I rewrite reasoning-style questions into extraction-style prompts to further improve factual accuracy. Together, these steps yield steadier recall, lower noise, and more accurate answers on long, table-dense financial reports.
 
