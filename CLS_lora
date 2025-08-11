@@ -1,0 +1,601 @@
+import os
+import pickle
+import random
+from pathlib import Path
+from typing import List, Dict, Tuple, Optional
+import numpy as np
+from sklearn.model_selection import train_test_split
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
+from sentence_transformers import SentenceTransformer
+import json
+from datetime import datetime
+import logging
+from dataclasses import dataclass
+import math
+
+# 设置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class LoRALayer(nn.Module):
+    """LoRA层实现"""
+    
+    def __init__(self, in_features: int, out_features: int, rank: int = 16, alpha: float = 16.0):
+        super().__init__()
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+        
+        # LoRA矩阵：A是随机初始化，B是零初始化
+        self.lora_A = nn.Parameter(torch.randn(rank, in_features) * 0.01)
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        
+    def forward(self, x):
+        # LoRA计算：x @ A^T @ B^T * scaling
+        return (x @ self.lora_A.T @ self.lora_B.T) * self.scaling
+
+class LoRALinear(nn.Module):
+    """带LoRA的线性层"""
+    
+    def __init__(self, original_layer: nn.Linear, rank: int = 16, alpha: float = 16.0):
+        super().__init__()
+        self.original_layer = original_layer
+        self.lora = LoRALayer(original_layer.in_features, original_layer.out_features, rank, alpha)
+        
+        # 冻结原始权重
+        for param in self.original_layer.parameters():
+            param.requires_grad = False
+    
+    def forward(self, x):
+        # 原始输出 + LoRA输出
+        return self.original_layer(x) + self.lora(x)
+
+class LoRAAdapter:
+    """LoRA适配器，用于给模型添加LoRA层"""
+    
+    def __init__(self, model: nn.Module, target_modules: List[str] = None, rank: int = 16, alpha: float = 16.0):
+        """
+        Args:
+            model: 要适配的模型
+            target_modules: 要添加LoRA的模块名称（如['query', 'key', 'value', 'dense']）
+            rank: LoRA秩
+            alpha: LoRA缩放因子
+        """
+        self.model = model
+        self.rank = rank
+        self.alpha = alpha
+        self.target_modules = target_modules or ['query', 'key', 'value', 'dense']
+        self.lora_layers = {}
+        
+        self._add_lora_layers()
+    
+    def _add_lora_layers(self):
+        """为目标模块添加LoRA层"""
+        for name, module in self.model.named_modules():
+            if any(target in name for target in self.target_modules):
+                if isinstance(module, nn.Linear):
+                    # 获取父模块和属性名
+                    parent_name = '.'.join(name.split('.')[:-1])
+                    attr_name = name.split('.')[-1]
+                    
+                    parent_module = self.model
+                    for part in parent_name.split('.'):
+                        if part:
+                            parent_module = getattr(parent_module, part)
+                    
+                    # 替换为LoRA版本
+                    lora_layer = LoRALinear(module, self.rank, self.alpha)
+                    setattr(parent_module, attr_name, lora_layer)
+                    self.lora_layers[name] = lora_layer
+                    
+                    logger.info(f"添加LoRA到: {name}")
+    
+    def get_lora_parameters(self):
+        """获取所有LoRA参数"""
+        params = []
+        for lora_layer in self.lora_layers.values():
+            params.extend([lora_layer.lora.lora_A, lora_layer.lora.lora_B])
+        return params
+    
+    def save_lora_weights(self, path: str):
+        """保存LoRA权重"""
+        lora_state = {}
+        for name, lora_layer in self.lora_layers.items():
+            lora_state[name] = {
+                'lora_A': lora_layer.lora.lora_A.data,
+                'lora_B': lora_layer.lora.lora_B.data,
+                'rank': lora_layer.lora.rank,
+                'alpha': lora_layer.lora.alpha
+            }
+        
+        torch.save(lora_state, path)
+        logger.info(f"LoRA权重已保存到: {path}")
+    
+    def load_lora_weights(self, path: str):
+        """加载LoRA权重"""
+        lora_state = torch.load(path, map_location='cpu')
+        
+        for name, state in lora_state.items():
+            if name in self.lora_layers:
+                self.lora_layers[name].lora.lora_A.data = state['lora_A']
+                self.lora_layers[name].lora.lora_B.data = state['lora_B']
+        
+        logger.info(f"LoRA权重已从 {path} 加载")
+
+class RAGDatasetLoader:
+    """RAG数据集加载器（复用之前的代码）"""
+    
+    def __init__(self, base_dir: str):
+        self.base_dir = Path(base_dir)
+        self.files_info = []
+        self._scan_files()
+    
+    def _scan_files(self):
+        logger.info(f"扫描目录: {self.base_dir}")
+        
+        for file_folder in self.base_dir.iterdir():
+            if file_folder.is_dir():
+                pagenum2context_path = file_folder / "pagenum2context.pkl"
+                page_question_dir = file_folder / "page_question"
+                
+                if pagenum2context_path.exists() and page_question_dir.exists():
+                    required_files = [
+                        "page2question.pkl",
+                        "question_list.pkl", 
+                        "questions2page.pkl"
+                    ]
+                    
+                    all_exist = all(
+                        (page_question_dir / file).exists() 
+                        for file in required_files
+                    )
+                    
+                    if all_exist:
+                        self.files_info.append({
+                            'name': file_folder.name,
+                            'path': file_folder,
+                            'pagenum2context': pagenum2context_path,
+                            'page_question_dir': page_question_dir
+                        })
+                        logger.info(f"找到有效文件: {file_folder.name}")
+        
+        logger.info(f"总共找到 {len(self.files_info)} 个有效文件")
+    
+    def load_file_data(self, file_info: Dict) -> Tuple[Dict, Dict, List, Dict]:
+        try:
+            with open(file_info['pagenum2context'], 'rb') as f:
+                pagenum2context = pickle.load(f)
+            
+            page_question_dir = file_info['page_question_dir']
+            
+            with open(page_question_dir / "page2question.pkl", 'rb') as f:
+                page2question = pickle.load(f)
+            
+            with open(page_question_dir / "question_list.pkl", 'rb') as f:
+                question_list = pickle.load(f)
+                
+            with open(page_question_dir / "questions2page.pkl", 'rb') as f:
+                questions2page = pickle.load(f)
+            
+            return pagenum2context, page2question, question_list, questions2page
+            
+        except Exception as e:
+            logger.error(f"加载文件 {file_info['name']} 失败: {e}")
+            return {}, {}, [], {}
+    
+    def get_files_list(self) -> List[Dict]:
+        return self.files_info.copy()
+
+@dataclass
+class TrainingSample:
+    """训练样本"""
+    question: str
+    positive_context: str
+    negative_context: str
+    file_name: str
+
+class RAGDataset(Dataset):
+    """RAG数据集"""
+    
+    def __init__(self, samples: List[TrainingSample], tokenizer, max_length: int = 512):
+        self.samples = samples
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        
+        # 编码question
+        question_encoding = self.tokenizer(
+            sample.question,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+        
+        # 编码positive context
+        pos_encoding = self.tokenizer(
+            sample.positive_context,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+        
+        # 编码negative context
+        neg_encoding = self.tokenizer(
+            sample.negative_context,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+        
+        return {
+            'question_input_ids': question_encoding['input_ids'].squeeze(),
+            'question_attention_mask': question_encoding['attention_mask'].squeeze(),
+            'positive_input_ids': pos_encoding['input_ids'].squeeze(),
+            'positive_attention_mask': pos_encoding['attention_mask'].squeeze(),
+            'negative_input_ids': neg_encoding['input_ids'].squeeze(),
+            'negative_attention_mask': neg_encoding['attention_mask'].squeeze(),
+        }
+
+class LoRAFineTuner:
+    """基于LoRA的微调器"""
+    
+    def __init__(self, 
+                 model_name: str = "all-MiniLM-L6-v2",
+                 rank: int = 16,
+                 alpha: float = 32.0,
+                 target_modules: List[str] = None):
+        """
+        Args:
+            model_name: 基础模型名称
+            rank: LoRA秩（越小参数越少）
+            alpha: LoRA缩放因子
+            target_modules: 要添加LoRA的模块
+        """
+        self.model_name = model_name
+        self.rank = rank
+        self.alpha = alpha
+        
+        # 加载原始模型和tokenizer
+        logger.info(f"加载模型: {model_name}")
+        self.sentence_transformer = SentenceTransformer(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        
+        # 获取transformer模型
+        self.transformer_model = self.sentence_transformer[0].auto_model
+        
+        # 添加LoRA适配器
+        self.lora_adapter = LoRAAdapter(
+            self.transformer_model, 
+            target_modules or ['query', 'key', 'value', 'dense'],
+            rank, 
+            alpha
+        )
+        
+        # 设置设备
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.sentence_transformer.to(self.device)
+        
+        logger.info(f"LoRA适配器已添加，秩={rank}, alpha={alpha}")
+        logger.info(f"使用设备: {self.device}")
+    
+    def create_training_samples(self, file_data_list: List[Tuple]) -> List[TrainingSample]:
+        """创建训练样本"""
+        samples = []
+        
+        # 收集所有上下文
+        all_contexts = []
+        question_to_context = {}
+        
+        for file_idx, (pagenum2context, page2question, question_list, questions2page) in enumerate(file_data_list):
+            file_name = f"file_{file_idx}"
+            
+            # 收集该文件的所有上下文
+            file_contexts = list(pagenum2context.values())
+            all_contexts.extend(file_contexts)
+            
+            # 建立问题到上下文的映射
+            for question in question_list:
+                if question in questions2page:
+                    page_num = questions2page[question]
+                    if page_num in pagenum2context:
+                        positive_context = pagenum2context[page_num]
+                        
+                        # 随机选择负样本（来自其他页面）
+                        negative_candidates = [
+                            ctx for p_num, ctx in pagenum2context.items() 
+                            if p_num != page_num
+                        ]
+                        
+                        if negative_candidates:
+                            negative_context = random.choice(negative_candidates)
+                            
+                            samples.append(TrainingSample(
+                                question=question,
+                                positive_context=positive_context,
+                                negative_context=negative_context,
+                                file_name=file_name
+                            ))
+        
+        logger.info(f"创建了 {len(samples)} 个训练样本")
+        return samples
+    
+    def compute_contrastive_loss(self, question_emb, pos_emb, neg_emb, temperature=0.07):
+        """计算对比损失"""
+        # 归一化embedding
+        question_emb = torch.nn.functional.normalize(question_emb, p=2, dim=1)
+        pos_emb = torch.nn.functional.normalize(pos_emb, p=2, dim=1)
+        neg_emb = torch.nn.functional.normalize(neg_emb, p=2, dim=1)
+        
+        # 计算相似度
+        pos_sim = torch.sum(question_emb * pos_emb, dim=1) / temperature
+        neg_sim = torch.sum(question_emb * neg_emb, dim=1) / temperature
+        
+        # 对比损失
+        logits = torch.stack([pos_sim, neg_sim], dim=1)
+        labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
+        
+        loss = torch.nn.functional.cross_entropy(logits, labels)
+        return loss
+    
+    def encode_text(self, input_ids, attention_mask):
+        """编码文本获取embedding"""
+        outputs = self.transformer_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask
+        )
+        
+        # 使用CLS token或者平均池化
+        embeddings = outputs.last_hidden_state[:, 0, :]  # CLS token
+        return embeddings
+    
+    def train(self, 
+              train_samples: List[TrainingSample],
+              val_samples: Optional[List[TrainingSample]] = None,
+              epochs: int = 3,
+              batch_size: int = 8,
+              learning_rate: float = 1e-4,
+              output_dir: str = "lora_finetuned"):
+        """训练模型"""
+        
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True)
+        
+        # 创建数据集和数据加载器
+        train_dataset = RAGDataset(train_samples, self.tokenizer)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        
+        val_loader = None
+        if val_samples:
+            val_dataset = RAGDataset(val_samples, self.tokenizer)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size)
+        
+        # 设置优化器（只优化LoRA参数）
+        lora_params = self.lora_adapter.get_lora_parameters()
+        optimizer = torch.optim.AdamW(lora_params, lr=learning_rate, weight_decay=0.01)
+        
+        # 学习率调度器
+        total_steps = len(train_loader) * epochs
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=int(0.1 * total_steps),
+            num_training_steps=total_steps
+        )
+        
+        logger.info(f"开始训练，总步数: {total_steps}")
+        logger.info(f"LoRA参数数量: {sum(p.numel() for p in lora_params)}")
+        
+        # 训练循环
+        for epoch in range(epochs):
+            self.transformer_model.train()
+            total_loss = 0
+            
+            for batch_idx, batch in enumerate(train_loader):
+                # 移动到设备
+                for key in batch:
+                    batch[key] = batch[key].to(self.device)
+                
+                optimizer.zero_grad()
+                
+                # 编码问题
+                question_emb = self.encode_text(
+                    batch['question_input_ids'],
+                    batch['question_attention_mask']
+                )
+                
+                # 编码正样本
+                pos_emb = self.encode_text(
+                    batch['positive_input_ids'],
+                    batch['positive_attention_mask']
+                )
+                
+                # 编码负样本
+                neg_emb = self.encode_text(
+                    batch['negative_input_ids'],
+                    batch['negative_attention_mask']
+                )
+                
+                # 计算损失
+                loss = self.compute_contrastive_loss(question_emb, pos_emb, neg_emb)
+                
+                # 反向传播
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(lora_params, 1.0)
+                optimizer.step()
+                scheduler.step()
+                
+                total_loss += loss.item()
+                
+                if batch_idx % 50 == 0:
+                    logger.info(f"Epoch {epoch+1}/{epochs}, Batch {batch_idx}/{len(train_loader)}, Loss: {loss.item():.4f}")
+            
+            avg_loss = total_loss / len(train_loader)
+            logger.info(f"Epoch {epoch+1} 完成，平均损失: {avg_loss:.4f}")
+            
+            # 验证
+            if val_loader:
+                val_loss = self._validate(val_loader)
+                logger.info(f"验证损失: {val_loss:.4f}")
+            
+            # 保存检查点
+            checkpoint_path = output_dir / f"lora_epoch_{epoch+1}.pt"
+            self.lora_adapter.save_lora_weights(str(checkpoint_path))
+        
+        # 保存最终模型
+        final_path = output_dir / "lora_final.pt"
+        self.lora_adapter.save_lora_weights(str(final_path))
+        
+        # 保存配置
+        config = {
+            'model_name': self.model_name,
+            'rank': self.rank,
+            'alpha': self.alpha,
+            'target_modules': list(self.lora_adapter.target_modules)
+        }
+        
+        with open(output_dir / "lora_config.json", 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        logger.info(f"训练完成！模型保存在: {output_dir}")
+    
+    def _validate(self, val_loader):
+        """验证模型"""
+        self.transformer_model.eval()
+        total_loss = 0
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                for key in batch:
+                    batch[key] = batch[key].to(self.device)
+                
+                question_emb = self.encode_text(
+                    batch['question_input_ids'],
+                    batch['question_attention_mask']
+                )
+                
+                pos_emb = self.encode_text(
+                    batch['positive_input_ids'],
+                    batch['positive_attention_mask']
+                )
+                
+                neg_emb = self.encode_text(
+                    batch['negative_input_ids'],
+                    batch['negative_attention_mask']
+                )
+                
+                loss = self.compute_contrastive_loss(question_emb, pos_emb, neg_emb)
+                total_loss += loss.item()
+        
+        return total_loss / len(val_loader)
+    
+    def load_lora_weights(self, path: str):
+        """加载LoRA权重"""
+        self.lora_adapter.load_lora_weights(path)
+    
+    def get_enhanced_sentence_transformer(self):
+        """获取增强后的SentenceTransformer"""
+        return self.sentence_transformer
+
+def main_lora_training():
+    """主LoRA训练流程"""
+    
+    # 配置
+    BASE_DIR = "path/to/your/84_files"  # 替换为实际路径
+    TRAIN_RATIO = 0.8
+    
+    # 1. 加载数据
+    logger.info("=== 步骤1: 加载数据 ===")
+    loader = RAGDatasetLoader(BASE_DIR)
+    all_files = loader.get_files_list()
+    
+    if len(all_files) == 0:
+        logger.error("未找到任何有效文件！")
+        return
+    
+    # 2. 分割数据
+    logger.info("=== 步骤2: 分割数据 ===")
+    random.shuffle(all_files)
+    split_idx = int(len(all_files) * TRAIN_RATIO)
+    
+    train_files = all_files[:split_idx]
+    val_files = all_files[split_idx:]
+    
+    logger.info(f"训练文件: {len(train_files)} 个")
+    logger.info(f"验证文件: {len(val_files)} 个")
+    
+    # 3. 加载数据
+    train_data_list = []
+    for file_info in train_files:
+        data = loader.load_file_data(file_info)
+        if data[0]:
+            train_data_list.append(data)
+    
+    val_data_list = []
+    for file_info in val_files:
+        data = loader.load_file_data(file_info)
+        if data[0]:
+            val_data_list.append(data)
+    
+    # 4. 初始化LoRA微调器
+    logger.info("=== 步骤4: 初始化LoRA微调器 ===")
+    finetuner = LoRAFineTuner(
+        model_name="all-MiniLM-L6-v2",
+        rank=16,           # 较小的rank，保持原模型能力
+        alpha=32.0,        # 适中的缩放因子
+        target_modules=['query', 'key', 'value', 'dense']  # 只微调注意力层
+    )
+    
+    # 5. 创建训练样本
+    logger.info("=== 步骤5: 创建训练样本 ===")
+    train_samples = finetuner.create_training_samples(train_data_list)
+    val_samples = finetuner.create_training_samples(val_data_list) if val_data_list else None
+    
+    # 6. 开始训练
+    logger.info("=== 步骤6: 开始LoRA训练 ===")
+    finetuner.train(
+        train_samples=train_samples,
+        val_samples=val_samples,
+        epochs=3,
+        batch_size=8,          # 较小的batch size适合LoRA
+        learning_rate=1e-4,    # 较小的学习率
+        output_dir="lora_rag_model"
+    )
+    
+    logger.info("LoRA微调完成！")
+    
+    # 7. 测试微调后的模型
+    logger.info("=== 步骤7: 测试微调效果 ===")
+    enhanced_model = finetuner.get_enhanced_sentence_transformer()
+    
+    # 示例测试
+    test_texts = [
+        "如何学习Python编程？",
+        "什么是机器学习？",
+        "Python是一种编程语言"
+    ]
+    
+    embeddings = enhanced_model.encode(test_texts)
+    logger.info(f"测试embedding形状: {embeddings.shape}")
+    
+    return finetuner
+
+if __name__ == "__main__":
+    # 设置随机种子
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+    
+    # 运行LoRA训练
+    finetuner = main_lora_training()
