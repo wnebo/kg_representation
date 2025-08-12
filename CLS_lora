@@ -605,51 +605,41 @@ if __name__ == "__main__":
 
 
 
-import copy
-import torch.nn as nn
+# 直接把 LoRA 權重合併進本地 bge，無需注入 LoRA 結構
+import torch, torch.nn as nn
+from pathlib import Path
+from sentence_transformers import SentenceTransformer
 
-def merge_lora_into_linear(st_model):
-    """把每个 LoRALinear 合并回原始 nn.Linear，并去掉 LoRA 包装"""
-    # 深拷贝一个用于导出
-    merged_model = copy.deepcopy(st_model)
+BASE_MODEL_DIR = "/path/to/local/bge"          # ← 你的本地 bge 目錄
+WEIGHTS_PATH   = "lora_rag_model/lora_epoch_1.pt"  # ← 你的 LoRA 權重
+SAVE_DIR       = "bge-merged"                  # ← 輸出目錄
 
-    # 找到 transformer backbone
-    backbone = merged_model[0].auto_model
+def get_submodule(root, dotted):
+    obj = root
+    for p in dotted.split("."):
+        if p.isdigit():         # ModuleList/Sequential 的數字索引
+            obj = obj[int(p)]
+        else:
+            obj = getattr(obj, p)
+    return obj
 
-    def _get_parent(model, name):
-        parts = name.split(".")
-        parent = model
-        for p in parts[:-1]:
-            parent = getattr(parent, p)
-        attr = parts[-1]
-        return parent, attr
+def main():
+    st = SentenceTransformer(BASE_MODEL_DIR)
+    backbone = st[0].auto_model                # transformer 主體
+    lora_state = torch.load(WEIGHTS_PATH, map_location="cpu")
 
-    # 遍历并合并
-    for full_name, module in list(backbone.named_modules()):
-        if isinstance(module, LoRALinear):
-            # 计算 merged weight
-            W = module.original_layer.weight.data    # [out, in]
-            A = module.lora.lora_A.data              # [r, in]
-            B = module.lora.lora_B.data              # [out, r]
-            scaling = module.lora.alpha / module.lora.rank
-            W_merged = W + scaling * (B @ A)
+    # 將每個 Linear: W <- W + (alpha/r) * (B @ A)
+    for name, s in lora_state.items():
+        lin = get_submodule(backbone, name)
+        assert isinstance(lin, nn.Linear), f"{name} 不是 Linear"
+        A, B = s["lora_A"], s["lora_B"]
+        scale = float(s["alpha"]) / float(s["rank"])
+        with torch.no_grad():
+            lin.weight += scale * (B @ A)
 
-            # 构造一个新的普通 Linear，拷贝 bias
-            new_linear = nn.Linear(module.original_layer.in_features,
-                                   module.original_layer.out_features,
-                                   bias=(module.original_layer.bias is not None))
-            new_linear.weight.data.copy_(W_merged)
-            if module.original_layer.bias is not None:
-                new_linear.bias.data.copy_(module.original_layer.bias.data)
+    Path(SAVE_DIR).mkdir(parents=True, exist_ok=True)
+    st.save(SAVE_DIR)
+    print(f"已導出：{Path(SAVE_DIR).resolve()}")
 
-            # 放回父模块，替换掉 LoRALinear
-            parent, attr = _get_parent(backbone, full_name)
-            setattr(parent, attr, new_linear)
-
-    return merged_model
-
-# 合并并保存
-merged = merge_lora_into_linear(st_model)
-SAVE_DIR = "merged-sbert"
-merged.save(SAVE_DIR)   # SentenceTransformer 的保存方式
-print(f"Merged 模型已保存到：{SAVE_DIR}")
+if __name__ == "__main__":
+    main()
