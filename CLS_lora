@@ -599,3 +599,57 @@ if __name__ == "__main__":
     
     # 运行LoRA训练
     finetuner = main_lora_training()
+
+
+
+
+
+
+import copy
+import torch.nn as nn
+
+def merge_lora_into_linear(st_model):
+    """把每个 LoRALinear 合并回原始 nn.Linear，并去掉 LoRA 包装"""
+    # 深拷贝一个用于导出
+    merged_model = copy.deepcopy(st_model)
+
+    # 找到 transformer backbone
+    backbone = merged_model[0].auto_model
+
+    def _get_parent(model, name):
+        parts = name.split(".")
+        parent = model
+        for p in parts[:-1]:
+            parent = getattr(parent, p)
+        attr = parts[-1]
+        return parent, attr
+
+    # 遍历并合并
+    for full_name, module in list(backbone.named_modules()):
+        if isinstance(module, LoRALinear):
+            # 计算 merged weight
+            W = module.original_layer.weight.data    # [out, in]
+            A = module.lora.lora_A.data              # [r, in]
+            B = module.lora.lora_B.data              # [out, r]
+            scaling = module.lora.alpha / module.lora.rank
+            W_merged = W + scaling * (B @ A)
+
+            # 构造一个新的普通 Linear，拷贝 bias
+            new_linear = nn.Linear(module.original_layer.in_features,
+                                   module.original_layer.out_features,
+                                   bias=(module.original_layer.bias is not None))
+            new_linear.weight.data.copy_(W_merged)
+            if module.original_layer.bias is not None:
+                new_linear.bias.data.copy_(module.original_layer.bias.data)
+
+            # 放回父模块，替换掉 LoRALinear
+            parent, attr = _get_parent(backbone, full_name)
+            setattr(parent, attr, new_linear)
+
+    return merged_model
+
+# 合并并保存
+merged = merge_lora_into_linear(st_model)
+SAVE_DIR = "merged-sbert"
+merged.save(SAVE_DIR)   # SentenceTransformer 的保存方式
+print(f"Merged 模型已保存到：{SAVE_DIR}")
