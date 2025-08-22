@@ -1,0 +1,84 @@
+# pip install sentence-transformers peft accelerate transformers datasets tensorboard
+import pickle, random
+from sentence_transformers import SentenceTransformer, InputExample, losses, util
+from torch.utils.data import DataLoader
+import torch, math, os
+
+MODEL_NAME = "BAAI/bge-large-en-v1.5"  # 或 "BAAI/bge-large-en"
+SAVE_DIR   = "./bge-large-en-ft"
+
+def load_pkl(path):
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+pos_data = load_pkl("positive_sample.pkl")    # [{question, context, ...}, ...]
+neg_data = load_pkl("negative_sample.pkl")    # [{question, context, ...}, ...]
+tri_data = load_pkl("triplets.pkl")           # [{anchor, positive, negative}, ...]
+
+# —— Stage-1: 构建配对数据 —— #
+pair_examples = []
+for item in pos_data:
+    q = "query: " + item["question"]
+    p = "passage: " + item["context"]
+    pair_examples.append(InputExample(texts=[q, p]))
+
+# —— Stage-2: 构建三元组数据 —— #
+triplet_examples = []
+for t in tri_data:
+    a = "query: "   + t["anchor"]
+    p = "passage: " + t["positive"]
+    n = "passage: " + t["negative"]
+    triplet_examples.append(InputExample(texts=[a, p, n]))
+
+# 可选：将 negative_sample 里与相同 question 的 context 作为 hard negative 补入 triplets
+# （略，按需构造 InputExample(texts=[q, pos, neg]) 追加到 triplet_examples）
+
+# 模型加载（保持mean pooling + L2 norm）
+model = SentenceTransformer(MODEL_NAME, device="cuda" if torch.cuda.is_available() else "cpu")
+
+# DataLoader
+batch_size_stage1 = 128
+train_loader_s1 = DataLoader(pair_examples, batch_size=batch_size_stage1, shuffle=True, drop_last=True)
+train_loader_s2 = DataLoader(triplet_examples, batch_size=64, shuffle=True, drop_last=True)
+
+# 损失
+loss_s1 = losses.MultipleNegativesRankingLoss(model)
+loss_s2 = losses.TripletLoss(model, distance_metric=losses.SiameseDistanceMetric.COSINE_DISTANCE, triplet_margin=0.2)
+
+# 学习率与 warmup
+num_epochs_s1 = 2
+num_epochs_s2 = 1
+warmup_ratio   = 0.06
+
+def warmup_steps(loader, epochs):
+    return math.ceil(len(loader) * epochs * warmup_ratio)
+
+# —— Stage-1 训练 —— #
+model.fit(
+    train_objectives=[(train_loader_s1, loss_s1)],
+    epochs=num_epochs_s1,
+    optimizer_params={"lr": 3e-5},
+    warmup_steps=warmup_steps(train_loader_s1, num_epochs_s1),
+    scheduler="cosine",
+    weight_decay=0.01,
+    use_amp=True,
+    show_progress_bar=True,
+    output_path=None # 阶段性不保存
+)
+
+# —— Stage-2 训练（triplet）—— #
+model.fit(
+    train_objectives=[(train_loader_s2, loss_s2)],
+    epochs=num_epochs_s2,
+    optimizer_params={"lr": 2e-5},
+    warmup_steps=warmup_steps(train_loader_s2, num_epochs_s2),
+    scheduler="cosine",
+    weight_decay=0.01,
+    use_amp=True,
+    show_progress_bar=True,
+    output_path=SAVE_DIR
+)
+
+# 最终保存（SentenceTransformer 会保存 tokenizer、config 等）
+model.save(SAVE_DIR)
+print("Saved:", SAVE_DIR)
