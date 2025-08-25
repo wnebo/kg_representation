@@ -1,14 +1,1 @@
-Practical Optimizations to GraphRAG for Financial Documents: Three Key Improvements
-
-
-Introduction
-This talk focuses on making GraphRAG practical for financial documents—where reports are long and tables are abundant—so we can find the right page, retrieve the right span, and answer accurately. I present three pragmatic improvements  entered on recall and precision:
-
-1. Question-guided sliding windows: the LLM scans the corpus with the user question in mind and returns the most relevant pages, substantially improving recall.
-
-2. Prompt-embedded generative retriever: by embedding a generative retriever directly in the LLM prompt, we suppress retrieval noise and, in my comparisons, outperform a standard reranker.
-
-3. page_question_index as a lightweight alternative: instead of parsing tables upfront, we only locate pages. Concretely, for each page, the LLM generates a small set of “questions this page can answer,” and we build an index from generated question → source span on that page. At query time, we first match the user question in the question space, then jump back to the linked span. This avoids table parsing while remaining efficient and explainable, and it works well because question-to-question similarity is often stronger than question-to-raw-text similarity on table-heavy pages.
-
-Finally, at answer time, I rewrite reasoning-style questions into extraction-style prompts to further improve factual accuracy. Together, these steps yield steadier recall, lower noise, and more accurate answers on long, table-dense financial reports.
-
+This six-month internship was conducted at the BNP Paribas Corporate and Institutional Banking (CIB) AI Lab, focusing on enhancing the performance of Retrieval-Augmented Generation (RAG) through the GraphRAG framework. During the internship, I systematically analyzed the core mechanisms of GraphRAG and developed a recall evaluation framework using both internal and open-source datasets to assess its applicability in financial contexts. Building upon this foundation, I proposed an improved Query-Based RAG approach incorporating the concept of a Generative Retriever, significantly boosting recall and reasoning accuracy: for complex reasoning tasks on ~200-page annual reports, the system achieved an 85% probability of locating the correct page within a 5-page window. Furthermore, I designed a scalable Page-Question-Index architecture, which reduced online response time to approximately 5 minutes for processing 150 queries while substantially decreasing token consumption. Finally, by applying contrastive learning and LoRA fine-tuning to synthetic datasets, I improved embedding model recall by an additional 3–5%. These findings provide practical insights and technical strategies for optimizing the efficiency of RAG applications powered by LLMs in the financial domain.
