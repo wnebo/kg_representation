@@ -1,0 +1,64 @@
+# 适配器：把你公司的 openai 兼容 client 封成 LangChain 的 Embeddings
+from typing import List
+from langchain_core.embeddings import Embeddings
+
+class MyOpenAICompatEmbeddings(Embeddings):
+    def __init__(self, client, model: str, batch_size: int = 128, normalize: bool = False):
+        self.client = client
+        self.model = model
+        self.batch_size = batch_size
+        self.normalize = normalize
+
+    def _post(self, inputs: List[str]) -> List[List[float]]:
+        # 你的 client: client.embeddings.create(model=..., input=[...])
+        resp = self.client.embeddings.create(model=self.model, input=inputs)
+        vecs = [d.embedding for d in resp.data]
+        if self.normalize:
+            # 可选：单位化向量（有些检索会更稳）
+            import math
+            def norm(v): 
+                s = math.sqrt(sum(x*x for x in v)) or 1.0
+                return [x/s for x in v]
+            vecs = [norm(v) for v in vecs]
+        return vecs
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        out: List[List[float]] = []
+        for i in range(0, len(texts), self.batch_size):
+            out.extend(self._post(texts[i:i+self.batch_size]))
+        return out
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._post([text])[0]
+
+# 假设你已经有兼容的 client，例如：
+# from openai import OpenAI
+# client = OpenAI(base_url="https://your-company-endpoint/v1", api_key="xxx")
+
+from ragas import evaluate
+from ragas.metrics import answer_relevancy, faithfulness, context_precision, context_recall
+from datasets import Dataset
+
+emb = MyOpenAICompatEmbeddings(client=client, model="your-embedding-model")
+
+# 准备 RAGAS 需要的数据集（示例）
+data = {
+    "question": ["..."],
+    "contexts": [["ctx1", "ctx2"]],
+    "answer": ["..."],
+    "ground_truth": ["..."],
+}
+ds = Dataset.from_dict(data)
+
+# 如果你也用自家 LLM，可以用 LangChain 的 ChatOpenAI 传给 ragas（可选）
+# from langchain_openai import ChatOpenAI
+# llm = ChatOpenAI(openai_api_base="https://your-company-endpoint/v1",
+#                  api_key="xxx", model="your-chat-model")
+
+result = evaluate(
+    ds,
+    metrics=[answer_relevancy, faithfulness, context_precision, context_recall],
+    embeddings=emb,
+    # llm=llm,  # 如果 metric 需要 LLM，再传入
+)
+print(result)
